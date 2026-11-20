@@ -1,8 +1,9 @@
 """Playing a MIDI file (.mid, .kar) through an engine.
 
-The file is read with mido into events at their times; a thread hands them
+The file is read with mido into events at their times; a timer hands them
 to the engine a couple of seconds ahead, so a long file never floods the
-timeline and stop is immediate. Tempo can be scaled and the music
+timeline and stop is immediate. (A timer, not a thread with a loop: the
+same works in a browser, where there is one thread.) Tempo can be scaled and the music
 transposed (not the drums); channels can be muted (a karaoke skill mutes
 the melody while its own voice sings it).
 """
@@ -39,13 +40,17 @@ class FilePlayer:
         self.tempo = tempo or 1.0
         self.mute = set(mute)
         self.on_end = on_end
-        self._stop = threading.Event()
+        self.stopped = False
         self.started = None
-        self._thread = threading.Thread(target=self._run, name=f"midi-file-{source}", daemon=True)
+        self._next = 0          # index of the next event to hand over
+        self._round = 0.0       # start of the current time through the file
+        self._timer = None
+        self._lock = threading.Lock()
 
     def start(self):
         self.started = time.time() + self.engine.latency + 0.1
-        self._thread.start()
+        self._round = self.started
+        self._feed()
         return self
 
     @property
@@ -53,8 +58,16 @@ class FilePlayer:
         return self.length / self.tempo
 
     def stop(self):
-        self._stop.set()
+        with self._lock:
+            self.stopped = True
+            if self._timer:
+                self._timer.cancel()
         self.engine.stop_source(self.source)
+
+    def _later(self, seconds, fn):
+        self._timer = threading.Timer(max(0.0, seconds), fn)
+        self._timer.daemon = True
+        self._timer.start()
 
     def _schedule(self, t0, msg):
         e, ch = self.engine, msg.channel
@@ -73,20 +86,33 @@ class FilePlayer:
         elif msg.type == "control_change":
             e.add(t0, "cc", ch, msg.control, msg.value, source=self.source)
 
-    def _run(self):
-        start = self.started
-        while True:
-            for t, msg in self.events:
-                at = start + t / self.tempo
-                wait = at - AHEAD - time.time()
-                if wait > 0 and self._stop.wait(wait):
-                    return
-                if self._stop.is_set():
-                    return
+    def _feed(self):
+        """Hand over what is due in the next AHEAD seconds, then come back."""
+        with self._lock:
+            if self.stopped:
+                return
+            until = time.time() + AHEAD
+            while True:
+                if self._next >= len(self.events):
+                    end = self._round + self.length / self.tempo
+                    if not self.loop:
+                        self._later(end - time.time() + 0.5, self._ended)
+                        return
+                    self._round, self._next = end, 0
+                    if not self.events:
+                        return
+                t, msg = self.events[self._next]
+                at = self._round + t / self.tempo
+                if at > until:
+                    break
                 self._schedule(at, msg)
-            if not self.loop:
-                break
-            start += self.length / self.tempo
-        if not self._stop.wait(max(0.0, start + self.length / self.tempo - time.time() + 1.0)):
-            if self.on_end:
-                self.on_end(self)
+                self._next += 1
+            self._later(AHEAD / 2, self._feed)
+
+    def _ended(self):
+        with self._lock:
+            if self.stopped:
+                return
+            self.stopped = True
+        if self.on_end:
+            self.on_end(self)

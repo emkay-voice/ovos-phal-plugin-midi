@@ -81,3 +81,23 @@ def test_every_program_and_drum_sounds():
         s.note_on(9, key, 100)
         assert np.abs(s.render(2400)).max() > 0.01, key
         s.all_off(hard=True)
+
+
+def test_browser_mode_plays_on_time_with_a_timer(monkeypatch):
+    """In a browser (Emkay) there is no loop thread: a timer makes the blocks."""
+    from ovos_phal_plugin_midi import engine as eng
+    monkeypatch.setattr(eng.sys, "platform", "emscripten")
+    sink = NullSink(SR, keep=True)
+    sink.latency = 0.3
+    e = BuiltinEngine(sink, block=1024)
+    e.start()
+    assert e._thread is None
+    t = time.time() + 0.5
+    e.add(t, "on", 9, 36, 120, dur=0.1)
+    time.sleep(1.2)
+    e.shutdown()
+    x = np.concatenate([b for _, b in sink.blocks]).astype(float) / 32767
+    onset = int(np.argmax(np.abs(x) > 0.01))
+    assert abs((sink.blocks[0][0] + onset / SR) - t) < 0.002
+    starts = [a for a, _ in sink.blocks]
+    assert np.allclose(np.diff(starts), 1024 / SR)           # back to back, no gaps

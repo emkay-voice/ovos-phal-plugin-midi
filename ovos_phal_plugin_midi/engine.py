@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -192,6 +193,53 @@ class BuiltinEngine(Engine):
         elif ev.kind == "all_off":
             s.all_off(None if ev.ch < 0 else ev.ch, offset, group=ev.source or None)
 
+    def start(self):
+        if sys.platform == "emscripten":
+            # a browser (Emkay): one thread, and a sleep may not really
+            # sleep - so no loop; a timer makes what is due, a block at a time
+            self.sink.open()
+            self._tick()
+        else:
+            super().start()
+
+    def shutdown(self):
+        super().shutdown()
+        if sys.platform == "emscripten":
+            self.sink.close()
+
+    def _tick(self):
+        if self._stop.is_set():
+            return
+        sr, n = self.sample_rate, self.block
+        now = time.time()
+        if self.t0 is None:
+            if self.timeline.next_time() is not None:
+                self.t0 = now + self.latency
+                self.produced = 0
+        elif self.synth.active == 0 and self.timeline.next_time() is None:
+            self.t0 = None
+        while self.t0 is not None:
+            start = self.t0 + self.produced / sr
+            if start > now + self.latency:
+                break
+            if start < now - 0.5:           # fell far behind (the page was busy): catch up
+                self.produced += int((now - start) * sr) // n * n
+                continue
+            self._block(start, n)
+        t = threading.Timer(n / sr / 2, self._tick)
+        t.daemon = True
+        t.start()
+
+    def _block(self, start, n):
+        sr = self.sample_rate
+        end = start + n / sr
+        self._prepare_ahead(end + 0.5)
+        for ev in self.timeline.due(end):
+            self._apply(ev, min(n - 1, max(0, int(round((ev.t - start) * sr)))))
+        x = self.synth.render(n)
+        self.sink.write((np.clip(x, -1, 1) * 32767).astype(np.int16), start)
+        self.produced += n
+
     def _run(self):
         sr, n = self.sample_rate, self.block
         self.sink.open()
@@ -218,13 +266,7 @@ class BuiltinEngine(Engine):
                     ahead = start - time.time() - self.sink.latency
                     if ahead > 0:
                         time.sleep(ahead)
-                end = start + n / sr
-                self._prepare_ahead(end + 0.5)
-                for ev in self.timeline.due(end):
-                    self._apply(ev, min(n - 1, max(0, int(round((ev.t - start) * sr)))))
-                x = self.synth.render(n)
-                self.sink.write((np.clip(x, -1, 1) * 32767).astype(np.int16), start)
-                self.produced += n
+                self._block(start, n)
         finally:
             self.sink.close()
 
