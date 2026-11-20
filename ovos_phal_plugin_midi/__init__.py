@@ -1,0 +1,272 @@
+"""ovos-phal-plugin-midi: a MIDI instrument for OpenVoiceOS.
+
+Gives the device a General MIDI synthesizer on its message bus, so a skill
+can play music note by note, timed to the millisecond and changed while it
+plays, or hand it a MIDI file. It plays on:
+
+  * a real MIDI instrument plugged into the device (USB keyboard, synth,
+    drum module), when `output_port` names one;
+  * FluidSynth with a SoundFont, when pyfluidsynth and a SoundFont are there;
+  * otherwise its own synth in numpy (nothing to install), to the sound card,
+    or over the bus to a client that plays it (Emkay in a browser).
+
+Keyboards plugged into the device come the other way: what you play goes on
+the bus (ovos.midi.input), and with `thru` it sounds on the device.
+
+The bus messages are in the README. Configuration, in mycroft.conf:
+
+    "PHAL": {
+      "ovos-phal-plugin-midi": {
+        "synth": "auto",          # auto | builtin | fluidsynth | port
+        "audio": "auto",          # auto | sounddevice | paplay | pw-cat | aplay | bus
+        "soundfont": "",          # a .sf2 for FluidSynth (else a usual place is looked in)
+        "output_port": "",        # a MIDI output port (name or part of it)
+        "inputs": ["*"],          # input ports to listen to ([] for none)
+        "thru": false             # play what comes in on the device's own synth
+      }
+    }
+"""
+from __future__ import annotations
+
+import base64
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+from ovos_bus_client.message import Message
+from ovos_plugin_manager.phal import PHALPlugin
+from ovos_utils.log import LOG
+
+from . import ports
+from .audio import make_sink
+from .engine import BuiltinEngine, Engine, FluidSynthEngine, PortEngine
+from .player import FilePlayer
+
+PLUGIN = "ovos-phal-plugin-midi"
+SOUNDFONTS = [  # where distributions put a General MIDI SoundFont
+    "/usr/share/sounds/sf2/FluidR3_GM.sf2", "/usr/share/soundfonts/FluidR3_GM.sf2",
+    "/usr/share/sounds/sf2/default-GM.sf2", "/usr/share/soundfonts/default.sf2",
+    "/usr/share/sounds/sf2/TimGM6mb.sf2", "/usr/share/soundfonts/GeneralUser-GS.sf2",
+]
+KINDS = {"note", "on", "off", "program", "cc", "all_off"}
+
+
+def find_soundfont(configured: str = "") -> str | None:
+    for p in [configured] + SOUNDFONTS:
+        if p and os.path.isfile(os.path.expanduser(p)):
+            return os.path.expanduser(p)
+    return None
+
+
+def make_engine(cfg: dict, bus=None) -> Engine | None:
+    """The engine the configuration asks for, or the best one available."""
+    want = cfg.get("synth", "auto")
+    if want in ("auto", "port") and cfg.get("output_port"):
+        name = ports.find_output(cfg["output_port"])
+        if name:
+            try:
+                return PortEngine(name)
+            except Exception as e:
+                LOG.warning(f"{PLUGIN}: MIDI port {name!r}: {e}")
+        elif want == "port":
+            LOG.warning(f"{PLUGIN}: no MIDI output port like {cfg['output_port']!r}")
+    if want in ("auto", "fluidsynth"):
+        sf = find_soundfont(cfg.get("soundfont", ""))
+        if sf:
+            try:
+                return FluidSynthEngine(sf, driver=cfg.get("fluidsynth_driver"))
+            except Exception as e:
+                if want == "fluidsynth":
+                    LOG.warning(f"{PLUGIN}: FluidSynth: {e}")
+    sink = make_sink(cfg.get("audio", "auto"), int(cfg.get("sample_rate", 24000)), bus,
+                     cfg.get("audio_device"))
+    if sink is None:
+        LOG.warning(f"{PLUGIN}: no way to play sound found (install sounddevice, or pulseaudio-utils / alsa-utils)")
+        return None
+    return BuiltinEngine(sink, gain=float(cfg.get("gain", 0.8)), reverb=bool(cfg.get("reverb", True)))
+
+
+class MidiPlugin(PHALPlugin):
+
+    def __init__(self, bus=None, config=None):
+        super().__init__(bus=bus, name=PLUGIN, config=config or {})
+        self.engine = make_engine(self.config, self.bus)
+        if self.engine:
+            self.engine.start()
+            LOG.info(f"{PLUGIN}: {self.engine.status()}")
+        self.players: dict[str, FilePlayer] = {}
+        self._lock = threading.Lock()
+        on = self.bus.on
+        on("ovos.midi.status", self.handle_status)
+        on("ovos.midi.ports", self.handle_ports)
+        on("ovos.midi.events", self.handle_events)
+        on("ovos.midi.cancel", self.handle_cancel)
+        on("ovos.midi.play", self.handle_play)
+        on("ovos.midi.stop", self.handle_stop)
+        on("ovos.midi.panic", self.handle_panic)
+        on("mycroft.stop", self.handle_global_stop)
+        self.inputs = ports.Inputs(self.config.get("inputs", ["*"]), self._on_input).start()
+
+    # ------------------------------------------------------------ helpers
+    @staticmethod
+    def _source(message) -> str:
+        return str(message.data.get("source") or message.context.get("skill_id") or "bus")
+
+    def _reply(self, message, data):
+        self.bus.emit(message.response(data))
+
+    def status(self) -> dict:
+        s = self.engine.status() if self.engine else {"engine": "none", "latency": 0.0, "sample_rate": 0}
+        return {**s, "time": time.time(), "playing": sorted(self.players),
+                "ports": ports.names(), "listening": sorted(self.inputs.open)}
+
+    # ------------------------------------------------------------ handlers
+    def handle_status(self, message):
+        self._reply(message, self.status())
+
+    def handle_ports(self, message):
+        self._reply(message, ports.names())
+
+    def handle_events(self, message):
+        """{"source", "at" (wall time; default now + latency), "events": [[kind, t, ...]]}
+
+        kinds: ["note", t, ch, note, vel, dur]   a note with its length
+               ["on", t, ch, note, vel] / ["off", t, ch, note]
+               ["program", t, ch, program] / ["cc", t, ch, control, value]
+               ["all_off", t, ch]  (ch -1: every channel)
+        `t` is seconds after `at`."""
+        if not self.engine:
+            return
+        d = message.data
+        src = self._source(message)
+        at = float(d.get("at") or time.time() + self.engine.latency)
+        add = self.engine.add
+        for ev in d.get("events") or []:
+            try:
+                kind, t = ev[0], at + float(ev[1])
+                if kind not in KINDS:
+                    continue
+                ch = int(ev[2]) if len(ev) > 2 else -1
+                if kind == "note":
+                    add(t, "on", ch & 15, int(ev[3]) & 127, max(1, min(127, int(ev[4]))),
+                        dur=max(0.01, float(ev[5])), source=src)
+                elif kind == "on":
+                    add(t, "on", ch & 15, int(ev[3]) & 127, max(0, min(127, int(ev[4]))), source=src)
+                elif kind == "off":
+                    add(t, "off", ch & 15, int(ev[3]) & 127, source=src)
+                elif kind == "program":
+                    add(t, "program", ch & 15, int(ev[3]) & 127, source=src)
+                elif kind == "cc":
+                    add(t, "cc", ch & 15, int(ev[3]) & 127, int(ev[4]) & 127, source=src)
+                else:
+                    add(t, "all_off", ch, source=src)
+            except (IndexError, TypeError, ValueError):
+                LOG.debug(f"{PLUGIN}: bad event {ev!r}")
+
+    def handle_cancel(self, message):
+        """{"source", "after" (wall time; default now)}: its events from then
+        on are dropped - to send them again, changed."""
+        if self.engine:
+            n = self.engine.timeline.cancel(self._source(message),
+                                            float(message.data.get("after") or time.time()))
+            self._reply(message, {"cancelled": n})
+
+    def _file_bytes(self, d) -> bytes:
+        if d.get("data"):
+            return base64.b64decode(d["data"])
+        uri = d.get("uri") or d.get("path") or ""
+        if uri.startswith("file://"):
+            from urllib.parse import unquote
+            uri = unquote(uri[len("file://"):])
+        if uri.startswith(("http://", "https://")):
+            import urllib.request
+            with urllib.request.urlopen(uri, timeout=20) as r:
+                return r.read()
+        return Path(uri).expanduser().read_bytes()
+
+    def handle_play(self, message):
+        """{"uri" | "path" | "data" (base64), "source", "loop", "transpose",
+        "tempo", "mute": [channels]} -> ovos.midi.play.started / .ended"""
+        d = message.data
+        src = self._source(message)
+        if not self.engine:
+            self.bus.emit(message.reply("ovos.midi.play.failed", {"source": src, "error": "no synth"}))
+            return
+        try:
+            data = self._file_bytes(d)
+            self._stop_player(src)
+            p = FilePlayer(self.engine, data, src, loop=bool(d.get("loop")),
+                           transpose=int(d.get("transpose", 0)), tempo=float(d.get("tempo", 1.0)),
+                           mute=[int(c) for c in d.get("mute", [])], on_end=self._ended)
+        except Exception as e:
+            LOG.warning(f"{PLUGIN}: cannot play {d.get('uri') or d.get('path')}: {e}")
+            self.bus.emit(message.reply("ovos.midi.play.failed", {"source": src, "error": str(e)}))
+            return
+        with self._lock:
+            self.players[src] = p
+        p.start()
+        self.bus.emit(message.reply("ovos.midi.play.started",
+                                    {"source": src, "at": p.started, "duration": p.duration, "loop": p.loop}))
+
+    def _ended(self, player):
+        with self._lock:
+            if self.players.get(player.source) is player:
+                del self.players[player.source]
+        self.bus.emit(Message("ovos.midi.play.ended", {"source": player.source}))
+
+    def _stop_player(self, src):
+        with self._lock:
+            p = self.players.pop(src, None)
+        if p:
+            p.stop()
+
+    def handle_stop(self, message):
+        """{"source"}: that source's file and notes; no source: everything."""
+        src = message.data.get("source")
+        if src:
+            self._stop_player(src)
+            if self.engine:
+                self.engine.stop_source(src)
+        else:
+            self.handle_panic(message)
+
+    def handle_panic(self, message=None):
+        with self._lock:
+            players, self.players = list(self.players.values()), {}
+        for p in players:
+            p.stop()
+        if self.engine:
+            self.engine.panic()
+
+    def handle_global_stop(self, message):
+        if self.players:
+            self.handle_panic(message)
+
+    # ------------------------------------------------------------ keyboards
+    def _on_input(self, port, msg):
+        if msg.type in ("clock", "active_sensing"):
+            return
+        self.bus.emit(Message("ovos.midi.input", ports.message_data(port, msg)))
+        if self.config.get("thru") and self.engine and hasattr(msg, "channel"):
+            now, e, src = time.time(), self.engine, f"thru:{port}"
+            if msg.type == "note_on" and msg.velocity > 0:
+                e.add(now, "on", msg.channel, msg.note, msg.velocity, source=src)
+            elif msg.type in ("note_on", "note_off"):
+                e.add(now, "off", msg.channel, msg.note, source=src)
+            elif msg.type == "program_change":
+                e.add(now, "program", msg.channel, msg.program, source=src)
+            elif msg.type == "control_change":
+                e.add(now, "cc", msg.channel, msg.control, msg.value, source=src)
+
+    def shutdown(self):
+        self.handle_panic()
+        self.inputs.stop()
+        if self.engine:
+            self.engine.shutdown()
+        super().shutdown()
+
+
+if sys.platform == "emscripten":      # Emkay: no threads to spare for port scanning
+    ports.HAVE_PORTS = False

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ovos-phal-plugin-midi"
+version = "0.1.0a1"
+description = "OpenVoiceOS PHAL plugin: a MIDI instrument on the bus - a General MIDI synth skills can play note by note or give a MIDI file, MIDI keyboards in, real instruments out"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Andreas Lorensen"}]
+requires-python = ">=3.10"
+keywords = ["ovos", "openvoiceos", "plugin", "phal", "midi", "synthesizer", "music", "fluidsynth", "emkay"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: MIDI",
+    "Topic :: Multimedia :: Sound/Audio :: Sound Synthesis",
+]
+dependencies = [
+    "ovos-plugin-manager>=0.0.26",
+    "ovos-utils>=0.0.38",
+    "ovos-bus-client>=0.0.8",
+    "numpy",
+    "mido>=1.3",
+]
+
+[project.optional-dependencies]
+# MIDI keyboards and instruments plugged into the device
+ports = ["python-rtmidi"]
+# the sound card through PortAudio (lowest latency)
+sounddevice = ["sounddevice"]
+# FluidSynth with a SoundFont (needs the fluidsynth library from the system)
+fluidsynth = ["pyfluidsynth"]
+all = ["python-rtmidi", "sounddevice", "pyfluidsynth"]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/emkay-voice/ovos-phal-plugin-midi"
+Issues = "https://github.com/emkay-voice/ovos-phal-plugin-midi/issues"
+Emkay = "https://github.com/emkay-voice/emkay"
+
+[project.entry-points."opm.phal"]
+ovos-phal-plugin-midi = "ovos_phal_plugin_midi:MidiPlugin"
+
+[tool.setuptools]
+packages = ["ovos_phal_plugin_midi"]
