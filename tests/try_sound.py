@@ -9,7 +9,8 @@ import wave
 import numpy as np
 
 from ovos_phal_plugin_midi.audio import make_sink
-from ovos_phal_plugin_midi.engine import BuiltinEngine
+from ovos_phal_plugin_midi.engine import Engine
+from ovos_phal_plugin_midi.synth import Synth
 
 kind = sys.argv[1] if len(sys.argv) > 1 else "auto"
 sink = make_sink(kind)
@@ -18,7 +19,7 @@ sink_name = subprocess.run(["pactl", "get-default-sink"], capture_output=True, t
 rec = subprocess.Popen(["parec", "-d", f"{sink_name}.monitor", "--format=s16le", "--rate=24000",
                         "--channels=1", "--latency-msec=10"], stdout=subprocess.PIPE)
 t_rec = time.time()
-e = BuiltinEngine(sink)
+e = Engine(sink, Synth(sink.sample_rate))
 e.start()
 t = time.time() + 1.0
 times = [t + i * 0.5 for i in range(6)]

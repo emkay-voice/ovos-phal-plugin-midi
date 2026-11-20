@@ -47,8 +47,9 @@ class FilePlayer:
         self._timer = None
         self._lock = threading.Lock()
 
-    def start(self):
-        self.started = time.time() + self.engine.latency + 0.1
+    def start(self, at=None):
+        """From `at` (wall time), or as soon as the engine can."""
+        self.started = float(at) if at else time.time() + self.engine.latency + 0.1
         self._round = self.started
         self._feed()
         return self

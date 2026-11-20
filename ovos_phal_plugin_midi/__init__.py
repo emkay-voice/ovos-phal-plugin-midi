@@ -29,6 +29,7 @@ The bus messages are in the README. Configuration, in mycroft.conf:
 from __future__ import annotations
 
 import base64
+import io
 import os
 import sys
 import threading
@@ -41,8 +42,9 @@ from ovos_utils.log import LOG
 
 from . import ports
 from .audio import make_sink
-from .engine import BuiltinEngine, Engine, FluidSynthEngine, PortEngine
+from .engine import Engine, PortEngine
 from .player import FilePlayer
+from .synth import Synth
 
 PLUGIN = "ovos-phal-plugin-midi"
 SOUNDFONTS = [  # where distributions put a General MIDI SoundFont
@@ -53,6 +55,26 @@ SOUNDFONTS = [  # where distributions put a General MIDI SoundFont
 KINDS = {"note", "on", "off", "program", "cc", "all_off"}
 
 
+def wav_samples(data: bytes):
+    """(mono float samples, sample rate) of a WAV file."""
+    import wave
+    import numpy as np
+    with wave.open(io.BytesIO(data)) as w:
+        ch, width, sr = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        raw = w.readframes(w.getnframes())
+    if width == 2:
+        x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
+    elif width == 4:
+        x = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2 ** 31
+    elif width == 1:
+        x = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128) / 128
+    else:
+        raise ValueError(f"{8 * width}-bit WAV")
+    if ch > 1:
+        x = x.reshape(-1, ch).mean(axis=1)
+    return x, sr
+
+
 def find_soundfont(configured: str = "") -> str | None:
     for p in [configured] + SOUNDFONTS:
         if p and os.path.isfile(os.path.expanduser(p)):
@@ -60,7 +82,7 @@ def find_soundfont(configured: str = "") -> str | None:
     return None
 
 
-def make_engine(cfg: dict, bus=None) -> Engine | None:
+def make_engine(cfg: dict, bus=None):
     """The engine the configuration asks for, or the best one available."""
     want = cfg.get("synth", "auto")
     if want in ("auto", "port") and cfg.get("output_port"):
@@ -72,20 +94,37 @@ def make_engine(cfg: dict, bus=None) -> Engine | None:
                 LOG.warning(f"{PLUGIN}: MIDI port {name!r}: {e}")
         elif want == "port":
             LOG.warning(f"{PLUGIN}: no MIDI output port like {cfg['output_port']!r}")
+    sr = int(cfg.get("sample_rate", 24000))
+    sink = make_sink(cfg.get("audio", "auto"), sr, bus, cfg.get("audio_device"))
+    if sink is None:
+        LOG.warning(f"{PLUGIN}: no way to play sound found (install sounddevice, or pulseaudio-utils / alsa-utils)")
+        return None
+    reverb = bool(cfg.get("reverb", True))
+    instrument = None
     if want in ("auto", "fluidsynth"):
         sf = find_soundfont(cfg.get("soundfont", ""))
         if sf:
             try:
-                return FluidSynthEngine(sf, driver=cfg.get("fluidsynth_driver"))
+                from .fluid import FluidSynth
+                instrument = FluidSynth(sf, sink.sample_rate, gain=float(cfg.get("fluidsynth_gain", 0.8)),
+                                        reverb=reverb)
             except Exception as e:
-                if want == "fluidsynth":
-                    LOG.warning(f"{PLUGIN}: FluidSynth: {e}")
-    sink = make_sink(cfg.get("audio", "auto"), int(cfg.get("sample_rate", 24000)), bus,
-                     cfg.get("audio_device"))
-    if sink is None:
-        LOG.warning(f"{PLUGIN}: no way to play sound found (install sounddevice, or pulseaudio-utils / alsa-utils)")
-        return None
-    return BuiltinEngine(sink, gain=float(cfg.get("gain", 0.8)), reverb=bool(cfg.get("reverb", True)))
+                (LOG.warning if want == "fluidsynth" else LOG.info)(f"{PLUGIN}: FluidSynth: {e}")
+    if instrument is None:
+        instrument = Synth(sink.sample_rate, gain=float(cfg.get("gain", 0.45)), reverb=reverb)
+    engine = Engine(sink, instrument)
+    engine.duck_level = float(cfg.get("duck_volume", 0.3))
+    return engine
+
+
+#: what OVOS sends when it starts and stops speaking or listening: the music
+#: goes down meanwhile (as ovos-audio's AudioService ducks its own)
+SPEAKING = {"recognizer_loop:audio_output_start": True, "ovos.audio.output.started": True,
+            "recognizer_loop:audio_output_end": False, "ovos.audio.output.ended": False}
+LISTENING = {"recognizer_loop:record_begin": True, "ovos.listener.record.started": True,
+             "recognizer_loop:wakeword": True, "ovos.listener.wakeword": True,
+             "recognizer_loop:record_end": False, "ovos.listener.record.ended": False}
+LISTEN_AT_MOST = 15.0      # seconds: a listening that never said it ended
 
 
 class MidiPlugin(PHALPlugin):
@@ -106,7 +145,13 @@ class MidiPlugin(PHALPlugin):
         on("ovos.midi.play", self.handle_play)
         on("ovos.midi.stop", self.handle_stop)
         on("ovos.midi.panic", self.handle_panic)
+        on("ovos.midi.clip", self.handle_clip)
         on("mycroft.stop", self.handle_global_stop)
+        self._speaking = False
+        self._listening = 0.0      # since when (0: not listening)
+        if self.config.get("duck", True):
+            for t in list(SPEAKING) + list(LISTENING):
+                on(t, self.handle_duck)
         self.inputs = ports.Inputs(self.config.get("inputs", ["*"]), self._on_input).start()
 
     # ------------------------------------------------------------ helpers
@@ -187,8 +232,9 @@ class MidiPlugin(PHALPlugin):
         return Path(uri).expanduser().read_bytes()
 
     def handle_play(self, message):
-        """{"uri" | "path" | "data" (base64), "source", "loop", "transpose",
-        "tempo", "mute": [channels]} -> ovos.midi.play.started / .ended"""
+        """{"uri" | "path" | "data" (base64), "source", "at" (wall time; default
+        now + latency), "loop", "transpose", "tempo", "mute": [channels]}
+        -> ovos.midi.play.started {at, duration} / .ended"""
         d = message.data
         src = self._source(message)
         if not self.engine:
@@ -206,9 +252,37 @@ class MidiPlugin(PHALPlugin):
             return
         with self._lock:
             self.players[src] = p
-        p.start()
+        p.start(d.get("at"))
         self.bus.emit(message.reply("ovos.midi.play.started",
                                     {"source": src, "at": p.started, "duration": p.duration, "loop": p.loop}))
+
+    def handle_clip(self, message):
+        """{"path" | "uri" | "data" (base64 WAV), "source", "at" (wall time;
+        default now + latency), "gain"}: recorded sound, heard from `at` on,
+        in the same output as the music and in time with it (a voice that
+        sings to it). -> ovos.midi.clip.response {at, duration} or {error}"""
+        d = message.data
+        src = self._source(message)
+        try:
+            if not self.engine:
+                raise RuntimeError("no synth")
+            samples, sr = wav_samples(self._file_bytes(d))
+            at = float(d.get("at") or time.time() + self.engine.latency)
+            dur = self.engine.add_clip(at, samples, sr, float(d.get("gain", 1.0)), src)
+            self._reply(message, {"source": src, "at": at, "duration": dur})
+        except Exception as e:
+            LOG.warning(f"{PLUGIN}: clip: {e}")
+            self._reply(message, {"source": src, "error": str(e)})
+
+    def handle_duck(self, message):
+        t = message.msg_type
+        if t in SPEAKING:
+            self._speaking = SPEAKING[t]
+        else:
+            self._listening = time.time() if LISTENING[t] else 0.0
+        listening = self._listening and time.time() - self._listening < LISTEN_AT_MOST
+        if self.engine:
+            self.engine.duck(bool(self._speaking or listening))
 
     def _ended(self, player):
         with self._lock:

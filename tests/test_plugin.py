@@ -77,3 +77,41 @@ def test_bad_file_says_so(bus):
     bus.emit(Message("ovos.midi.play", {"path": "/nonexistent.mid", "source": "t"}))
     assert bus.last("ovos.midi.play.failed").data["source"] == "t"
     p.shutdown()
+
+
+def wav_bytes(seconds=0.3, sr=16000):
+    import wave
+    import numpy as np
+    b = io.BytesIO()
+    with wave.open(b, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((np.sin(np.arange(int(seconds * sr)) / 5) * 8000).astype("<i2").tobytes())
+    return b.getvalue()
+
+
+def test_clip_comes_back_with_its_time(bus):
+    p = plugin(bus)
+    at = time.time() + 3
+    bus.emit(Message("ovos.midi.clip", {"data": base64.b64encode(wav_bytes()).decode(),
+                                        "source": "karaoke", "at": at}))
+    r = bus.last("ovos.midi.clip.response").data
+    assert r["at"] == at and abs(r["duration"] - 0.3) < 0.01 and len(p.engine.clips) == 1
+    p.shutdown()
+
+
+def test_play_at_a_given_time(bus):
+    p = plugin(bus)
+    at = time.time() + 4
+    bus.emit(Message("ovos.midi.play", {"data": base64.b64encode(small_file()).decode(),
+                                        "source": "k", "at": at}))
+    assert bus.last("ovos.midi.play.started").data["at"] == at
+    p.shutdown()
+
+
+def test_ducks_while_ovos_speaks(bus):
+    p = plugin(bus)
+    bus.emit(Message("recognizer_loop:audio_output_start"))
+    assert p.engine.ducked
+    bus.emit(Message("ovos.audio.output.ended"))
+    assert not p.engine.ducked
+    p.shutdown()

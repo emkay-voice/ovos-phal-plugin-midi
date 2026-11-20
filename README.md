@@ -52,7 +52,7 @@ Optional, for more:
 |---|---|
 | `pip install --pre "ovos-phal-plugin-midi[ports]"` | python-rtmidi: MIDI keyboards and instruments plugged into the device |
 | `pip install --pre "ovos-phal-plugin-midi[sounddevice]"` | PortAudio: the lowest latency from the built-in synth |
-| `pip install --pre "ovos-phal-plugin-midi[fluidsynth]"` + `sudo apt install fluidsynth fluid-soundfont-gm` | FluidSynth with the FluidR3 SoundFont: real instrument samples |
+| `pip install --pre "ovos-phal-plugin-midi[fluidsynth]"` + `sudo apt install fluidsynth fluid-soundfont-gm` (Fedora: `sudo dnf install fluidsynth-libs fluid-soundfont-gm`) | FluidSynth with the FluidR3 SoundFont: real instrument samples. It is used by itself once it is there |
 
 ## Configure
 
@@ -81,7 +81,9 @@ Nothing has to be set. To change something, in `mycroft.conf`:
 | `output_port` | a MIDI output port: its name or part of it, e.g. `"Roland"` |
 | `inputs` | the input ports to listen to, as names or globs (default `["*"]`: all; `[]`: none) |
 | `thru` | play what comes in from a keyboard on the device's own synth (default `false`) |
-| `gain`, `reverb` | the built-in synth's level (0.8) and room (`true`) |
+| `gain`, `reverb` | the built-in synth's level (0.45) and room (`true`) |
+| `fluidsynth_gain` | FluidSynth's level (0.8): the two sound about as loud |
+| `duck`, `duck_volume` | turn the music down while OVOS speaks or listens (`true`), and how far (0.3) |
 | `sample_rate` | the built-in synth's sample rate (24000) |
 
 ## Permissions
@@ -133,13 +135,18 @@ channels are 0-15, with channel 9 as the drum kit, as in General MIDI.
 |---|---|---|
 | `ovos.midi.events` | `source`, `at` (default: now + latency), `events` | play events (below) at `at` + their own time |
 | `ovos.midi.cancel` | `source`, `after` (default: now) | take back that source's events from then on; answers `cancelled` (how many) |
-| `ovos.midi.play` | `uri` / `path` / `data` (base64), `source`, `loop`, `transpose`, `tempo`, `mute` (channels) | play a `.mid` or `.kar` file. Answers `ovos.midi.play.started` (`at`, `duration`) or `.failed` (`error`); `ovos.midi.play.ended` when it ends |
+| `ovos.midi.play` | `uri` / `path` / `data` (base64), `source`, `at`, `loop`, `transpose`, `tempo`, `mute` (channels) | play a `.mid` or `.kar` file from `at` (default: as soon as it can). Answers `ovos.midi.play.started` (`at`, `duration`) or `.failed` (`error`); `ovos.midi.play.ended` when it ends |
+| `ovos.midi.clip` | `path` / `uri` / `data` (base64 WAV), `source`, `at`, `gain` | recorded sound, heard from `at` on, in the same output as the music and in time with it (a voice singing to it). Answers `at`, `duration` (or `error`; a MIDI port plays no clips) |
 | `ovos.midi.stop` | `source` | stop that source's file and notes; with no `source`, everything |
 | `ovos.midi.panic` | | stop everything, all notes off |
 | `ovos.midi.status` | | answers with the engine, `latency`, `sample_rate`, `time` (the device's clock), what is playing, the ports |
 | `ovos.midi.ports` | | answers `inputs`, `outputs` |
 | `ovos.midi.input` | `port`, `type`, `channel`, `note`, `velocity`, `control`, `value`, `program` | sent by the plugin: what a keyboard played |
 | `ovos.midi.pcm` | `seq`, `sample_rate`, `at`, `pcm` (base64 s16le mono) | sent by the plugin with `"audio": "bus"`: the sound, for a client that plays it |
+
+While OVOS speaks or listens (`recognizer_loop:audio_output_start`,
+`record_begin`, and the `ovos.audio.output.*` / `ovos.listener.*` names) the
+music goes down, as ovos-audio does with its own.
 
 `mycroft.stop` also stops what plays from files. A skill's own notes are its
 skill's to stop, with `ovos.midi.stop`.
@@ -181,9 +188,12 @@ answers quickly.
   (`instruments.py`, the same instruments as
   [ovos-skill-karaoke](https://github.com/emkay-voice/ovos-skill-karaoke)'s
   band) and kept, so playing is cheap.
-- `engine.py` keeps the timeline of events and has three engines: the
-  built-in synth, which places each event on its exact sample; FluidSynth;
-  and a MIDI port.
+- `fluid.py` is FluidSynth as an instrument. It makes its samples here, a
+  block at a time, instead of through its own audio driver, so its notes
+  land on their sample too and get the same clips and ducking.
+- `engine.py` keeps the timeline of events. The engine mixes the instrument
+  (the built-in synth or FluidSynth) with clips and ducks it, a block at a
+  time, to an audio output. A MIDI port gets its notes sent at their time.
 - `audio.py` holds the sound outputs.
 - `player.py` plays files: it hands their events to the engine a couple of
   seconds ahead, so stop is immediate.
