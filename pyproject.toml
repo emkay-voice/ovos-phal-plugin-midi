@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ovos-phal-plugin-midi"
-version = "0.1.0a2"
+version = "0.1.0"
 description = "OpenVoiceOS PHAL plugin: a MIDI instrument on the bus - a General MIDI synth skills can play note by note or give a MIDI file, MIDI keyboards in, real instruments out"
 readme = "README.md"
 license = {text = "Apache-2.0"}
