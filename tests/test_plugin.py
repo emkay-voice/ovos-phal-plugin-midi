@@ -115,3 +115,31 @@ def test_ducks_while_ovos_speaks(bus):
     bus.emit(Message("ovos.audio.output.ended"))
     assert not p.engine.ducked
     p.shutdown()
+
+
+def test_the_status_carries_the_settings(bus):
+    p = plugin(bus)
+    bus.emit(Message("ovos.midi.status"))
+    s = bus.last("ovos.midi.status.response").data["settings"]
+    assert s["synth"] == "builtin" and s["inputs"] == [] and s["thru"] is False and s["duck"] is True
+    p.shutdown()
+
+
+def test_new_settings_take_effect_at_once(bus):
+    p = plugin(bus)
+    first = p.engine
+    bus.emit(Message("ovos.midi.reload", {"config": {"audio": "null", "synth": "builtin", "inputs": [],
+                                                     "thru": True, "duck": False}}))
+    r = bus.last("ovos.midi.reload.response").data
+    assert r["engine"] == "builtin" and r["settings"]["thru"] is True and r["settings"]["duck"] is False
+    assert p.engine is not first, "a new synth"
+    assert p.handle_duck not in bus.handlers.get("recognizer_loop:audio_output_start", []), "no ducking"
+    p.shutdown()
+
+
+def test_a_sound_output_that_is_not_there_is_said_not_fatal(bus):
+    p = plugin(bus)
+    bus.emit(Message("ovos.midi.reload", {"config": {"audio": "no-such-player", "synth": "builtin", "inputs": []}}))
+    r = bus.last("ovos.midi.reload.response").data
+    assert r["engine"] == "none" and "no-such-player" in r["error"]
+    p.shutdown()

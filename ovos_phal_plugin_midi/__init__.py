@@ -13,7 +13,11 @@ plays, or hand it a MIDI file. It plays on:
 Keyboards plugged into the device come the other way: what you play goes on
 the bus (ovos.midi.input), and with `thru` it sounds on the device.
 
-The bus messages are in the README. Configuration, in mycroft.conf:
+The bus messages are in the README. The control panel's page (panel/) shows
+the status, sets what is below and plays a test; new settings take effect at
+once with ovos.midi.reload {"config": the plugin's section}.
+
+Configuration, in mycroft.conf:
 
     "PHAL": {
       "ovos-phal-plugin-midi": {
@@ -53,6 +57,17 @@ SOUNDFONTS = [  # where distributions put a General MIDI SoundFont
     "/usr/share/sounds/sf2/TimGM6mb.sf2", "/usr/share/soundfonts/GeneralUser-GS.sf2",
 ]
 KINDS = {"note", "on", "off", "program", "cc", "all_off"}
+#: the settings a control panel can change, with their defaults
+SETTINGS = {"synth": "auto", "audio": "auto", "soundfont": "", "output_port": "", "inputs": ["*"],
+            "thru": False, "duck": True, "duck_volume": 0.3, "gain": 0.45, "reverb": True}
+
+
+def have_fluidsynth() -> bool:
+    try:
+        import fluidsynth  # noqa: F401 - pyfluidsynth
+        return True
+    except Exception:  # ImportError, or the library missing under it
+        return False
 
 
 def wav_samples(data: bytes):
@@ -131,10 +146,7 @@ class MidiPlugin(PHALPlugin):
 
     def __init__(self, bus=None, config=None):
         super().__init__(bus=bus, name=PLUGIN, config=config or {})
-        self.engine = make_engine(self.config, self.bus)
-        if self.engine:
-            self.engine.start()
-            LOG.info(f"{PLUGIN}: {self.engine.status()}")
+        self.engine = self._make_engine()
         self.players: dict[str, FilePlayer] = {}
         self._lock = threading.Lock()
         on = self.bus.on
@@ -147,12 +159,26 @@ class MidiPlugin(PHALPlugin):
         on("ovos.midi.panic", self.handle_panic)
         on("ovos.midi.clip", self.handle_clip)
         on("mycroft.stop", self.handle_global_stop)
+        on("ovos.midi.reload", self.handle_reload)
         self._speaking = False
         self._listening = 0.0      # since when (0: not listening)
         if self.config.get("duck", True):
             for t in list(SPEAKING) + list(LISTENING):
                 on(t, self.handle_duck)
         self.inputs = ports.Inputs(self.config.get("inputs", ["*"]), self._on_input).start()
+
+    def _make_engine(self):
+        self.engine_error = ""
+        try:
+            engine = make_engine(self.config, self.bus)
+        except Exception as e:  # noqa: BLE001 - e.g. an audio output that isn't here
+            LOG.error(f"{PLUGIN}: {e}")
+            self.engine_error = str(e)
+            return None
+        if engine:
+            engine.start()
+            LOG.info(f"{PLUGIN}: {engine.status()}")
+        return engine
 
     # ------------------------------------------------------------ helpers
     @staticmethod
@@ -165,7 +191,10 @@ class MidiPlugin(PHALPlugin):
     def status(self) -> dict:
         s = self.engine.status() if self.engine else {"engine": "none", "latency": 0.0, "sample_rate": 0}
         return {**s, "time": time.time(), "playing": sorted(self.players),
-                "ports": ports.names(), "listening": sorted(self.inputs.open)}
+                "ports": ports.names(), "listening": sorted(self.inputs.open),
+                "settings": {k: self.config.get(k, d) for k, d in SETTINGS.items()},
+                "found_soundfont": find_soundfont(self.config.get("soundfont", "")),
+                "have_fluidsynth": have_fluidsynth(), "error": self.engine_error}
 
     # ------------------------------------------------------------ handlers
     def handle_status(self, message):
@@ -313,6 +342,24 @@ class MidiPlugin(PHALPlugin):
             p.stop()
         if self.engine:
             self.engine.panic()
+
+    def handle_reload(self, message):
+        """{"config": the plugin's section}: the synth, the sound and the ports
+        start again with it, at once. -> .response: the status"""
+        new = message.data.get("config")
+        if isinstance(new, dict):
+            self.config = dict(new)
+        self.handle_panic()
+        self.inputs.stop()
+        if self.engine:
+            self.engine.shutdown()
+        self.engine = self._make_engine()
+        self.inputs = ports.Inputs(self.config.get("inputs", ["*"]), self._on_input).start()
+        for t in list(SPEAKING) + list(LISTENING):
+            self.bus.remove(t, self.handle_duck)
+            if self.config.get("duck", True):
+                self.bus.on(t, self.handle_duck)
+        self._reply(message, self.status())
 
     def handle_global_stop(self, message):
         if self.players:

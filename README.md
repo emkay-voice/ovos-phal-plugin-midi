@@ -92,6 +92,17 @@ Nothing has to be set. To change something, in `mycroft.conf`:
 | `duck`, `duck_volume` | turn the music down while OVOS speaks or listens (`true`), and how far (0.3) |
 | `sample_rate` | the built-in synth's sample rate (24000) |
 
+## In the control panel
+
+With [ovos-control-panel](https://github.com/OpenVoiceOS/ovos-control-panel) on the device, the plugin brings
+its own page, **MIDI and instruments**, under **Music**. It shows what plays the music (the built-in synth,
+FluidSynth and its SoundFont, or an instrument on a MIDI port), where the sound goes, the delay, and the
+keyboards and instruments plugged in, with what to install when something is missing. It plays a chord or a drum
+fill to try it, and stops all sound. It sets what is above: `synth`, `output_port`, listening to keyboards,
+`thru`, ducking and how far, and under More `audio`, `soundfont` and `reverb`. They are saved in
+`mycroft.conf` with the panel's backups (only what differs from the defaults), and the plugin starts again with
+them at once (`ovos.midi.reload`), no restart. The page is in 11 languages.
+
 ## Permissions
 
 The plugin runs inside OVOS' PHAL service, as the same user. What that user
@@ -147,7 +158,8 @@ channels are 0-15, with channel 9 as the drum kit, as in General MIDI.
 | `ovos.midi.clip` | `path` / `uri` / `data` (base64 WAV), `source`, `at`, `gain` | recorded sound, heard from `at` on, in the same output as the music and in time with it (a voice singing to it). Answers `at`, `duration` (or `error`; a MIDI port plays no clips) |
 | `ovos.midi.stop` | `source` | stop that source's file and notes; with no `source`, everything |
 | `ovos.midi.panic` | | stop everything, all notes off |
-| `ovos.midi.status` | | answers with the engine, `latency`, `sample_rate`, `time` (the device's clock), what is playing, the ports |
+| `ovos.midi.status` | | answers with the engine, `latency`, `sample_rate`, `time` (the device's clock), what is playing, the ports, the `settings` in use, `found_soundfont`, `have_fluidsynth` and an `error` when the sound could not start |
+| `ovos.midi.reload` | `config`: the plugin's section | starts the synth, the sound and the ports again with it; answers as `status` |
 | `ovos.midi.ports` | | answers `inputs`, `outputs` |
 | `ovos.midi.input` | `port`, `type`, `channel`, `note`, `velocity`, `control`, `value`, `program` | sent by the plugin: what a keyboard played |
 | `ovos.midi.pcm` | `seq`, `sample_rate`, `at`, `pcm` (base64 s16le mono) | sent by the plugin with `"audio": "bus"`: the sound, for a client that plays it |
