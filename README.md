@@ -21,6 +21,12 @@ A keyboard plugged into the device works the other way too. What you play
 goes on the bus, so a skill can follow it, and with `thru` the device plays
 it.
 
+Skills that play on it:
+[ovos-skill-karaoke](https://github.com/emkay-voice/ovos-skill-karaoke)
+(the device sings, or you do) and
+[ovos-skill-jamband](https://github.com/emkay-voice/ovos-skill-jamband)
+(a band you lead with your voice).
+
 ## Why a plugin, and why software?
 
 Sound cards used to have a synthesizer chip, but that has been gone from
@@ -108,7 +114,9 @@ needs depends on what you use:
   socket, as the audio container has it, and for MIDI devices
   `--device /dev/snd` and the `audio` group (`group_add: [audio]`).
 - **Emkay** (a browser): no device access at all. The sound comes over the
-  bus to Emkay's page, which plays it. Emkay sees no keyboards yet.
+  bus to Emkay's page, which plays it. Emkay starts the plugin by itself
+  when it is installed (with a skill that needs it, or from the panel), and
+  at every start after that. Emkay sees no keyboards yet.
 
 The plugin opens no network port and sends nothing off the device.
 
