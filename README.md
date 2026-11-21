@@ -46,7 +46,7 @@ cannot do.
 ## Install
 
 ```bash
-pip install --pre ovos-phal-plugin-midi
+pip install ovos-phal-plugin-midi
 ```
 
 That is all the built-in synth needs. Restart OVOS' PHAL service
@@ -56,9 +56,9 @@ Optional, for more:
 
 | | |
 |---|---|
-| `pip install --pre "ovos-phal-plugin-midi[ports]"` | python-rtmidi: MIDI keyboards and instruments plugged into the device |
-| `pip install --pre "ovos-phal-plugin-midi[sounddevice]"` | PortAudio: the lowest latency from the built-in synth |
-| `pip install --pre "ovos-phal-plugin-midi[fluidsynth]"` + `sudo apt install fluidsynth fluid-soundfont-gm` (Fedora: `sudo dnf install fluidsynth-libs fluid-soundfont-gm`) | FluidSynth with the FluidR3 SoundFont: real instrument samples. It is used by itself once it is there |
+| `pip install "ovos-phal-plugin-midi[ports]"` | python-rtmidi: MIDI keyboards and instruments plugged into the device |
+| `pip install "ovos-phal-plugin-midi[sounddevice]"` | PortAudio: the lowest latency from the built-in synth |
+| `pip install "ovos-phal-plugin-midi[fluidsynth]"` + `sudo apt install fluidsynth fluid-soundfont-gm` (Fedora: `sudo dnf install fluidsynth-libs fluid-soundfont-gm`) | FluidSynth with the FluidR3 SoundFont: real instrument samples. It is used by itself once it is there |
 
 ## Configure
 
