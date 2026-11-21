@@ -191,6 +191,7 @@ class MidiPlugin(PHALPlugin):
     def status(self) -> dict:
         s = self.engine.status() if self.engine else {"engine": "none", "latency": 0.0, "sample_rate": 0}
         return {**s, "time": time.time(), "playing": sorted(self.players),
+                "latency_ms": round(float(s.get("latency") or 0) * 1000),
                 "ports": ports.names(), "listening": sorted(self.inputs.open),
                 "settings": {k: self.config.get(k, d) for k, d in SETTINGS.items()},
                 "found_soundfont": find_soundfont(self.config.get("soundfont", "")),
