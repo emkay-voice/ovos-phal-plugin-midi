@@ -8,7 +8,7 @@ version = "0.3.0a1"
 description = "OpenVoiceOS PHAL plugin: a MIDI instrument on the bus - a General MIDI synth skills can play note by note or give a MIDI file, MIDI keyboards in, real instruments out"
 readme = "README.md"
 license = {text = "Apache-2.0"}
-authors = [{name = "Andreas Lorensen"}]
+authors = [{name = "emkay-voice"}]
 requires-python = ">=3.10"
 keywords = ["ovos", "openvoiceos", "plugin", "phal", "midi", "synthesizer", "music", "fluidsynth", "emkay"]
 classifiers = [
