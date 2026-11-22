@@ -1,107 +1,55 @@
-"""The page this plugin adds to ovos-control-panel: its description, its
-strings in every language, and its routes talking to the plugin."""
+"""The page this plugin has in ovos-control-panel, described in
+controlpanel.json: the file, its strings in every language, and the status
+it reads."""
 import json
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
-from ovos_phal_plugin_midi import MidiPlugin, panel
+import ovos_phal_plugin_midi as m
+from ovos_phal_plugin_midi import MidiPlugin
 
-PANEL = Path(panel.__file__).parent
+ROOT = Path(m.__file__).parent
+TEXT = (ROOT / "controlpanel.json").read_text(encoding="utf-8")
+PAGE = json.loads(TEXT)
 LANGS = {"ca", "da", "de", "en", "es", "eu", "fr", "gl", "it", "nl", "pt"}
 
 
-def test_the_page_description_names_files_that_exist():
-    page = panel.PAGE
-    assert page["api_version"] == 1 and page["id"] == "midi" and page["group"] == "music"
-    assert panel.MUSIC in page["groups"]
-    for key in ("html", "icon"):
-        assert (PANEL / page[key]).is_file(), key
+def test_the_page_names_files_that_exist_and_its_own_messages():
+    assert PAGE["controlpanel"] == 1 and PAGE["id"] == "midi" and PAGE["group"] == "music"
+    assert (ROOT / PAGE["icon"]).is_file()
+    sent = re.findall(r'"(?:query|send|reload)": "([^"]+)"', TEXT)
+    assert sent and all(s.startswith(PAGE["bus"]) for s in sent)
 
 
 def test_the_page_speaks_every_language():
-    files = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in (PANEL / "i18n").glob("*.json")}
+    files = {p.parent.name.split("-")[0]: json.loads(p.read_text(encoding="utf-8"))
+             for p in (ROOT / "locale").glob("*/controlpanel.json")}
     assert set(files) == LANGS
     keys = set(files["en"])
     for lang, table in files.items():
         assert set(table) == keys, lang
         assert all(text.strip() for text in table.values()), lang
-    html = (PANEL / "page.html").read_text(encoding="utf-8")
-    used = set(re.findall(r'data-i18n="([^"]+)"', html)) | set(re.findall(r'"(midi\.[\w.]+)":', html))
-    assert used <= keys and keys - used <= {"midi.title", "nav.group.music"}
+    used = set(re.findall(r'"(midi\.[\w.]+)"', TEXT)) | set(re.findall(r"@(midi\.[\w.]+)\}", TEXT))
+    labels = {k for k in keys if any(k == u or k.startswith(u + ".") for u in used)}
+    assert used - {"midi.engine"} <= keys and keys - labels <= {"nav.group.music"}
 
 
-pytest.importorskip("fastapi")
-pytest.importorskip("httpx")
+def test_the_panel_reads_it():
+    described = pytest.importorskip("ovos_webui.described")
+    page, refs = described.check(PAGE, "ovos-phal-plugin-midi")
+    assert [b["type"] for b in page["blocks"]] == ["text", "status", "form"]
+    form = refs["b2.form"]
+    assert described.form_values(form, {"inputs": False, "synth": "port"}) == {"inputs": [], "synth": "port"}
 
 
-@pytest.fixture
-def client(monkeypatch):
-    from fastapi import APIRouter, FastAPI
-    from fastapi.testclient import TestClient
-    from ovos_utils.fakebus import FakeBus
-
-    monkeypatch.setitem(sys.modules, "ovos_webui", None)   # the bus client's own wait
-    bus = FakeBus()
-    plugin = MidiPlugin(bus=bus, config={"audio": "null", "synth": "builtin", "inputs": []})
-    user = {"PHAL": {"ovos-phal-plugin-midi": {"audio": "null", "inputs": []}}}
-
-    class Config:
-        @staticmethod
-        def mutate(change, bus=None):
-            change(user)
-
-        @staticmethod
-        def section(name):
-            return json.loads(json.dumps(user.get(name) or {}))
-
-    class R:
-        api = APIRouter(prefix="/api")
-        privileged = APIRouter(prefix="/api")
-        config = Config
-
-        @staticmethod
-        def need_bus():
-            return bus
-
-        @staticmethod
-        def bus():
-            return bus
-
-    panel.routes(R)
-    app = FastAPI()
-    app.include_router(R.api)
-    app.include_router(R.privileged)
-    with TestClient(app) as c:
-        yield c, plugin, user, bus
-    plugin.shutdown()
-
-
-def test_the_page_shows_the_status(client):
-    c, _, _, _ = client
-    s = c.get("/api/midi").json()
-    assert s["engine"] == "builtin" and "settings" in s
-
-
-def test_saving_writes_only_what_was_changed_and_takes_effect(client, monkeypatch):
-    c, plugin, user, _ = client
-    import ovos_phal_plugin_midi as m
-    real = m.make_engine
-    monkeypatch.setattr(m, "make_engine", lambda cfg, bus=None: real({**cfg, "audio": "null"}, bus))
-    r = c.post("/api/midi", json={"synth": "builtin", "listen": True, "thru": True, "duck_volume": 0.5})
-    assert r.status_code == 200, r.text
-    mine = user["PHAL"]["ovos-phal-plugin-midi"]
-    assert mine["synth"] == "builtin" and mine["thru"] is True and mine["duck_volume"] == 0.5
-    assert "inputs" not in mine and "duck" not in mine, "the defaults are left out"
-    assert r.json()["settings"]["thru"] is True and plugin.config["thru"] is True
-
-
-def test_a_test_sound_and_stop(client):
-    c, plugin, _, bus = client
-    seen = []
-    bus.on("ovos.midi.events", lambda m: seen.append(m))
-    assert c.post("/api/midi/test", json={"sound": "drums"}).json() == {"ok": True}
-    assert seen and c.post("/api/midi/stop").json() == {"ok": True}
-    assert c.post("/api/midi/test", json={"sound": "kazoo"}).status_code == 422
+def test_the_status_has_what_the_page_shows():
+    plugin = MidiPlugin(bus=__import__("ovos_utils.fakebus", fromlist=["FakeBus"]).FakeBus(),
+                        config={"audio": "null", "synth": "builtin", "inputs": []})
+    try:
+        s = plugin.status()
+        assert s["engine"] == "builtin" and isinstance(s["latency_ms"], int)
+        assert "outputs" in s["ports"] and "available" in s["ports"]
+    finally:
+        plugin.shutdown()
